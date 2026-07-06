@@ -31,14 +31,14 @@ jobs:
         with:
           repository: guleaada/tradepilot
           path: _spot
-          # token: ${{ secrets.AGENT_PAT }}
+          token: ${{ secrets.AGENT_PAT }}
 
       - name: Checkout futures agent
         uses: actions/checkout@v4
         with:
           repository: guleaada/tradepilot-futures
           path: _futures
-          # token: ${{ secrets.AGENT_PAT }}
+          token: ${{ secrets.AGENT_PAT }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
