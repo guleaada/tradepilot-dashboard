@@ -1,0 +1,71 @@
+name: Build & deploy dashboard
+
+on:
+  schedule:
+    - cron: '23 * * * *' # hourly, offset from the agents' */15 crons
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout dashboard
+        uses: actions/checkout@v4
+
+      # The two agent repos are PRIVATE. Until the AGENT_PAT secret exists and
+      # the `token:` lines below are uncommented, these checkouts fail softly
+      # (continue-on-error) and the dashboard deploys in its "no data yet"
+      # state instead of failing the whole run.
+      #
+      # AGENT_PAT: fine-grained PAT, Contents:read on guleaada/tradepilot and
+      # guleaada/tradepilot-futures only. NEVER write the token into any file.
+      - name: Checkout spot agent (tradepilot)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: guleaada/tradepilot
+          path: agents/spot
+          # token: ${{ secrets.AGENT_PAT }}
+
+      - name: Checkout futures agent (tradepilot-futures)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: guleaada/tradepilot-futures
+          path: agents/futures
+          # token: ${{ secrets.AGENT_PAT }}
+
+      - name: Export data.json
+        run: |
+          python3 export_dashboard.py \
+            --spot agents/spot/data/tradepilot.db \
+            --futures agents/futures/data/tradepilot-futures.db \
+            --out docs/data.json
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
