@@ -1,231 +1,190 @@
 #!/usr/bin/env python3
-"""Export TradePilot dual-agent stats into docs/data.json.
-
-Reads the SQLite databases committed by the two trading agents (spot
-TradePilot and TradePilot-Futures) and produces one small JSON file the
-static dashboard in docs/index.html renders. Stdlib only — no pip installs.
-
-Defensive by design: a missing database, table, or column produces partial
-data (or null for that agent), never a crash. CI runs this even before the
-AGENT_PAT secret is configured, in which case both agents export as null and
-the dashboard shows its "no data yet" state.
+"""
+export_dashboard.py — reads the spot and futures agent SQLite DBs and writes a
+single data.json the Mission Control dashboard renders. Run it in CI after both
+bots commit, or locally with both DB paths available.
 
 Usage:
-  python3 export_dashboard.py \
-    --spot    agents/spot/data/tradepilot.db \
-    --futures agents/futures/data/tradepilot-futures.db \
-    --out     docs/data.json
+    python export_dashboard.py \
+        --spot   ../tradepilot/data/tradepilot.db \
+        --futures ./data/tradepilot-futures.db \
+        --spot-base 1000 --futures-base 5000 --leverage 3 \
+        --out ./docs/data.json
+
+Everything degrades gracefully: a missing DB, empty tables, or absent columns
+just produce zeros/empties rather than crashing, so the dashboard always renders.
 """
-import argparse
-import json
-import os
-import sqlite3
-from datetime import datetime, timezone
+import argparse, json, sqlite3, datetime, os
 
-MAX_CURVE_POINTS = 600  # keep data.json small; ~30 days of hourly snapshots fits anyway
-
-
-def utcnow_iso():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def today_utc():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-
-def columns(cx, table):
+def q(db, sql, args=()):
     try:
-        return {r[1] for r in cx.execute(f"PRAGMA table_info({table})")}
-    except sqlite3.Error:
-        return set()
-
-
-def q(cx, sql, params=()):
-    try:
-        return cx.execute(sql, params).fetchall()
+        return db.execute(sql, args).fetchall()
     except sqlite3.Error:
         return []
 
+def one(db, sql, args=(), default=None):
+    r = q(db, sql, args)
+    return r[0][0] if r and r[0] and r[0][0] is not None else default
 
-def downsample(points, cap=MAX_CURVE_POINTS):
-    if len(points) <= cap:
-        return points
-    step = len(points) / cap
-    sampled = [points[int(i * step)] for i in range(cap)]
-    sampled[-1] = points[-1]  # always keep the latest reading
-    return sampled
-
-
-def round2(v):
-    return None if v is None else round(v, 2)
-
-
-def export_agent(path, kind):
-    """kind: 'spot' | 'futures'. Returns a dict or None when the DB is absent."""
-    if not path or not os.path.exists(path):
-        return None
-    cx = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    cx.row_factory = sqlite3.Row
+def has_col(db, table, col):
     try:
-        trade_cols = columns(cx, "trades")
-        dir_col = "direction" if "direction" in trade_cols else "side"
+        return col in [c[1] for c in db.execute(f"PRAGMA table_info({table})")]
+    except sqlite3.Error:
+        return False
 
-        # --- equity curve (hourly snapshots committed by the agent) ---
-        snaps = q(cx, "SELECT ts, equity FROM equity_snapshots ORDER BY id")
-        curve = downsample([[r["ts"], round(r["equity"], 2)] for r in snaps])
-        baseline = snaps[0]["equity"] if snaps else None
-        equity_now = snaps[-1]["equity"] if snaps else None
+def curve(db, base):
+    """Equity snapshots -> cumulative % return series."""
+    rows = q(db, "SELECT equity FROM equity_snapshots ORDER BY id")
+    if not rows:
+        return [0.0]
+    return [round((r[0] / base - 1) * 100, 4) for r in rows]
 
-        peak, max_dd = float("-inf"), 0.0
-        for r in snaps:
-            peak = max(peak, r["equity"])
-            if peak > 0:
-                max_dd = max(max_dd, (peak - r["equity"]) / peak)
+def trade_stats(db, base, futures=False):
+    closed = q(db, "SELECT pnl, initial_risk, qty, entry_price FROM trades WHERE status='closed' AND pnl IS NOT NULL")
+    equity = one(db, "SELECT equity FROM equity_snapshots ORDER BY id DESC LIMIT 1", default=base)
+    open_n = one(db, "SELECT COUNT(*) FROM trades WHERE status='open'", default=0)
+    n = len(closed)
+    wins = [t for t in closed if t[0] > 0]
+    losses = [t for t in closed if t[0] <= 0]
+    gross_win = sum(t[0] for t in wins)
+    gross_loss = abs(sum(t[0] for t in losses))
+    total_pnl = sum(t[0] for t in closed)
+    # avg R: pnl / (initial_risk * qty) when available
+    rs = []
+    for pnl, ir, qty, ep in closed:
+        risk = (ir or 0) * (qty or 0)
+        if risk > 0:
+            rs.append(pnl / risk)
+    # drawdown from snapshots
+    snaps = [r[0] for r in q(db, "SELECT equity FROM equity_snapshots ORDER BY id")]
+    peak, max_dd = -1e18, 0.0
+    for e in snaps:
+        peak = max(peak, e)
+        if peak > 0:
+            max_dd = max(max_dd, (peak - e) / peak)
+    out = {
+        "equity": round(equity, 2),
+        "retPct": round((equity / base - 1) * 100, 3),
+        "trades": n,
+        "winRate": (len(wins) / n) if n else None,
+        "profitFactor": (gross_win / gross_loss) if gross_loss > 0 else None,
+        "maxDdPct": round(max_dd * 100, 2),
+        "avgR": round(sum(rs) / len(rs), 3) if rs else None,
+        "openPositions": open_n,
+        "expectancy": round(total_pnl / n, 2) if n else None,
+    }
+    if futures and has_col(db, "trades", "direction"):
+        out["longPnl"] = round(one(db, "SELECT COALESCE(SUM(pnl),0) FROM trades WHERE status='closed' AND direction='long'", default=0), 2)
+        out["shortPnl"] = round(one(db, "SELECT COALESCE(SUM(pnl),0) FROM trades WHERE status='closed' AND direction='short'", default=0), 2)
+    return out
 
-        # --- closed-trade stats ---
-        closed = q(cx, "SELECT * FROM trades WHERE status = 'closed' ORDER BY id")
-        pnls = [t["pnl"] or 0 for t in closed]
-        wins = [p for p in pnls if p > 0]
-        gross_win = sum(wins)
-        gross_loss = abs(sum(p for p in pnls if p <= 0))
-        win_rate = len(wins) / len(closed) if closed else None
-        profit_factor = (
-            None if not closed
-            else (gross_win / gross_loss) if gross_loss > 0
-            else ("inf" if gross_win > 0 else None)
-        )
-        expectancy = (sum(pnls) / len(closed)) if closed else None
-        today_pnl = sum(
-            t["pnl"] or 0 for t in closed
-            if (t["exit_time"] or "").startswith(today_utc())
-        )
+def blockers(db):
+    """Parse no_entry reasons from events in the last 24h (best-effort)."""
+    since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)).isoformat()
+    rows = q(db, "SELECT detail FROM events WHERE type='NO_ENTRY' AND ts>=? ", (since,))
+    counts = {}
+    for (detail,) in rows:
+        try:
+            reason = json.loads(detail).get("reason", "other")
+        except Exception:
+            reason = "other"
+        counts[reason] = counts.get(reason, 0) + 1
+    # fallback: some builds log reasons differently — scan events broadly
+    if not counts:
+        for (detail,) in q(db, "SELECT detail FROM events WHERE ts>=?", (since,)):
+            try:
+                r = json.loads(detail).get("reason")
+                if r: counts[r] = counts.get(r, 0) + 1
+            except Exception:
+                pass
+    return [{"reason": k, "n": v} for k, v in sorted(counts.items(), key=lambda x: -x[1])[:8]]
 
-        # --- AI spend ---
-        spend_total = q(cx, "SELECT COALESCE(SUM(spend), 0) AS s FROM ai_budget")
-        spend_today = q(cx, "SELECT COALESCE(SUM(spend), 0) AS s FROM ai_budget WHERE date = ?", (today_utc(),))
+def trend_r(db):
+    if not has_col(db, "trades", "trend_class"):
+        return []
+    rows = q(db, """SELECT trend_class,
+                           COUNT(*) n,
+                           AVG(CASE WHEN pnl>0 THEN 1.0 ELSE 0.0 END) win,
+                           AVG(CASE WHEN initial_risk*qty>0 THEN pnl/(initial_risk*qty) END) avgR
+                    FROM trades WHERE status='closed' AND pnl IS NOT NULL
+                    GROUP BY trend_class""")
+    order = {"strong": 0, "normal": 1, "weak": 2}
+    out = [{"cls": r[0] or "normal", "n": r[1],
+            "win": round(r[2], 3) if r[2] is not None else None,
+            "avgR": round(r[3], 3) if r[3] is not None else None} for r in rows]
+    return sorted(out, key=lambda x: order.get(x["cls"], 9))
 
-        # --- open positions ---
-        open_rows = q(cx, "SELECT * FROM trades WHERE status = 'open' ORDER BY id")
-        open_positions = [
-            {
-                "pair": t["pair"],
-                "direction": t[dir_col] if dir_col in trade_cols else "long",
-                "qty": t["qty"],
-                "entry": round2(t["entry_price"]),
-                "stop": round2(t["stop_price"]),
-                "tp": round2(t["tp_price"]),
-                "opened": t["entry_time"],
-                **({"leverage": t["leverage"]} if "leverage" in trade_cols else {}),
-                **({"trend": t["trend_class"]} if "trend_class" in trade_cols else {}),
-                **({"funding": round(t["funding_paid"] or 0, 4)} if "funding_paid" in trade_cols else {}),
-            }
-            for t in open_rows
-        ]
+def feed(spot, fut):
+    items = []
+    def pull(db, bot, has_dir):
+        cols = "pair, entry_price, exit_price, pnl, status"
+        dircol = "direction" if has_dir else "'long'"
+        rows = q(db, f"SELECT {dircol}, {cols} FROM trades ORDER BY id DESC LIMIT 6")
+        for r in rows:
+            direction, pair, ep, xp, pnl, status = r
+            items.append({
+                "bot": bot, "dir": direction or "long", "pair": pair,
+                "entry": round(ep, 2) if ep else 0,
+                "exit": round(xp, 2) if xp else None,
+                "pnl": round(pnl, 2) if pnl is not None else None,
+                "note": status, "closed": status == "closed",
+                "_id": None,
+            })
+    if fut:   pull(fut, "fut", has_col(fut, "trades", "direction"))
+    if spot:  pull(spot, "spot", has_col(spot, "trades", "direction"))
+    return items[:8]
 
-        recent_trades = [
-            {
-                "pair": t["pair"],
-                "direction": t[dir_col] if dir_col in trade_cols else "long",
-                "pnl": round2(t["pnl"]),
-                "reason": t["exit_reason"],
-                "closed": t["exit_time"],
-                **({"trend": t["trend_class"]} if "trend_class" in trade_cols else {}),
-            }
-            for t in q(cx, "SELECT * FROM trades WHERE status = 'closed' ORDER BY id DESC LIMIT 10")
-        ]
-
-        # --- latest regime opinions (one per pair, newest first) ---
-        regimes = [
-            {"pair": r["pair"], "regime": r["regime"], "confidence": r["confidence"], "ts": r["ts"]}
-            for r in q(cx, """
-                SELECT pair, regime, confidence, ts FROM regime_calls
-                WHERE id IN (SELECT MAX(id) FROM regime_calls GROUP BY pair)
-                ORDER BY ts DESC LIMIT 15
-            """)
-        ]
-
-        last_event = q(cx, "SELECT ts FROM events ORDER BY id DESC LIMIT 1")
-
-        agent = {
-            "kind": kind,
-            "baseline": round2(baseline),
-            "equity": round2(equity_now),
-            "return_pct": round2((equity_now / baseline - 1) * 100) if baseline and equity_now else None,
-            "curve": curve,
-            "stats": {
-                "closed": len(closed),
-                "win_rate": round(win_rate, 4) if win_rate is not None else None,
-                "profit_factor": round(profit_factor, 2) if isinstance(profit_factor, float) else profit_factor,
-                "total_pnl": round2(sum(pnls)),
-                "expectancy": round2(expectancy),
-                "max_drawdown_pct": round(max_dd * 100, 2),
-                "today_pnl": round2(today_pnl),
-            },
-            "ai_spend": {
-                "total": round(spend_total[0]["s"], 4) if spend_total else 0,
-                "today": round(spend_today[0]["s"], 4) if spend_today else 0,
-            },
-            "open_positions": open_positions,
-            "recent_trades": recent_trades,
-            "regimes": regimes,
-            "last_activity": last_event[0]["ts"] if last_event else None,
-        }
-
-        # --- futures-only extras ---
-        if "direction" in trade_cols:
-            agent["by_direction"] = [
-                dict(r) for r in q(cx, """
-                    SELECT direction, COUNT(*) AS trades,
-                           SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
-                           ROUND(COALESCE(SUM(pnl), 0), 2) AS total_pnl
-                    FROM trades WHERE status = 'closed' GROUP BY direction ORDER BY direction
-                """)
-            ]
-        if "trend_class" in trade_cols:
-            agent["by_trend"] = [
-                dict(r) for r in q(cx, """
-                    SELECT COALESCE(trend_class, '(fixed tp)') AS trend, COUNT(*) AS trades,
-                           SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
-                           ROUND(AVG(pnl / (initial_risk * entry_qty)), 2) AS avg_r,
-                           ROUND(COALESCE(SUM(pnl), 0), 2) AS total_pnl
-                    FROM trades
-                    WHERE status = 'closed' AND initial_risk > 0 AND entry_qty > 0
-                    GROUP BY COALESCE(trend_class, '(fixed tp)')
-                """)
-            ]
-        if "funding_paid" in trade_cols:
-            funding = q(cx, "SELECT COALESCE(SUM(funding_paid), 0) AS f FROM trades")
-            agent["funding_total"] = round(funding[0]["f"], 4) if funding else 0
-
-        return agent
-    finally:
-        cx.close()
-
+def connect(path):
+    if path and os.path.exists(path):
+        try:
+            return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            return None
+    return None
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--spot", default="agents/spot/data/tradepilot.db")
-    ap.add_argument("--futures", default="agents/futures/data/tradepilot-futures.db")
-    ap.add_argument("--out", default="docs/data.json")
-    args = ap.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--spot"); ap.add_argument("--futures")
+    ap.add_argument("--spot-base", type=float, default=1000)
+    ap.add_argument("--futures-base", type=float, default=5000)
+    ap.add_argument("--leverage", type=int, default=3)
+    ap.add_argument("--start-date", default=None, help="YYYY-MM-DD experiment start, for day counter")
+    ap.add_argument("--out", default="data.json")
+    a = ap.parse_args()
+
+    sdb, fdb = connect(a.spot), connect(a.futures)
+
+    day = 1
+    if a.start_date:
+        try:
+            d0 = datetime.date.fromisoformat(a.start_date)
+            day = (datetime.date.today() - d0).days + 1
+        except ValueError:
+            pass
 
     data = {
-        "generated_at": utcnow_iso(),
-        "agents": {
-            "spot": export_agent(args.spot, "spot"),
-            "futures": export_agent(args.futures, "futures"),
+        "meta": {
+            "day": max(1, day),
+            "updated": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            "spot": {"base": a.spot_base},
+            "futures": {"base": a.futures_base, "leverage": a.leverage},
         },
+        "curves": {
+            "spot": curve(sdb, a.spot_base) if sdb else [0.0],
+            "fut": curve(fdb, a.futures_base) if fdb else [0.0],
+        },
+        "spot": trade_stats(sdb, a.spot_base) if sdb else {"equity": a.spot_base, "retPct": 0, "trades": 0, "winRate": None, "profitFactor": None, "maxDdPct": 0, "avgR": None, "openPositions": 0},
+        "futures": trade_stats(fdb, a.futures_base, futures=True) if fdb else {"equity": a.futures_base, "retPct": 0, "trades": 0, "winRate": None, "profitFactor": None, "maxDdPct": 0, "avgR": None, "openPositions": 0},
+        "blockers": blockers(fdb) if fdb else [],
+        "trendR": trend_r(fdb) if fdb else [],
+        "feed": feed(sdb, fdb),
     }
 
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    with open(args.out, "w") as f:
-        json.dump(data, f, separators=(",", ":"))
-
-    for name, agent in data["agents"].items():
-        status = f"equity ${agent['equity']} ({agent['stats']['closed']} closed trades)" if agent else "NO DATA (db missing)"
-        print(f"  {name:8s} {status}")
-    print(f"wrote {args.out} ({os.path.getsize(args.out):,} bytes)")
-
+    os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
+    with open(a.out, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"wrote {a.out}: day {data['meta']['day']}, "
+          f"spot {data['spot']['trades']} trades, futures {data['futures']['trades']} trades")
 
 if __name__ == "__main__":
     main()

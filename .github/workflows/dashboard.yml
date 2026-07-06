@@ -1,11 +1,11 @@
-name: Build & deploy dashboard
+name: Build dashboard
 
+# Rebuilds data.json from both agent repos and publishes to GitHub Pages.
+# Runs on a schedule (a bit behind the bots' 15-min cadence) and on demand.
 on:
   schedule:
-    - cron: '23 * * * *' # hourly, offset from the agents' */15 crons
+    - cron: '10,40 * * * *'   # twice an hour, offset from the bots' commits
   workflow_dispatch: {}
-  push:
-    branches: [main]
 
 permissions:
   contents: read
@@ -13,46 +13,47 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: dashboard
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
-      - name: Checkout dashboard
+      - name: Checkout dashboard repo
         uses: actions/checkout@v4
 
-      # The two agent repos are PRIVATE. Until the AGENT_PAT secret exists and
-      # the `token:` lines below are uncommented, these checkouts fail softly
-      # (continue-on-error) and the dashboard deploys in its "no data yet"
-      # state instead of failing the whole run.
-      #
-      # AGENT_PAT: fine-grained PAT, Contents:read on guleaada/tradepilot and
-      # guleaada/tradepilot-futures only. NEVER write the token into any file.
-      - name: Checkout spot agent (tradepilot)
+      # Pull the two agent repos just for their committed DBs.
+      # If they're PRIVATE, add a repo secret AGENT_PAT (a fine-grained PAT with
+      # read access to both) and uncomment the `token:` lines.
+      - name: Checkout spot agent
         uses: actions/checkout@v4
-        continue-on-error: true
         with:
           repository: guleaada/tradepilot
-          path: agents/spot
+          path: _spot
           # token: ${{ secrets.AGENT_PAT }}
 
-      - name: Checkout futures agent (tradepilot-futures)
+      - name: Checkout futures agent
         uses: actions/checkout@v4
-        continue-on-error: true
         with:
           repository: guleaada/tradepilot-futures
-          path: agents/futures
+          path: _futures
           # token: ${{ secrets.AGENT_PAT }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Export data.json
         run: |
-          python3 export_dashboard.py \
-            --spot agents/spot/data/tradepilot.db \
-            --futures agents/futures/data/tradepilot-futures.db \
+          python export_dashboard.py \
+            --spot    _spot/data/tradepilot.db \
+            --futures _futures/data/tradepilot-futures.db \
+            --spot-base 1000 --futures-base 5000 --leverage 3 \
+            --start-date 2026-07-04 \
             --out docs/data.json
+          cat docs/data.json | head -5
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

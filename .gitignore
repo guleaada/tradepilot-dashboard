@@ -3,4 +3,5 @@ docs/data.json
 
 __pycache__/
 .DS_Store
-agents/
+_spot/
+_futures/
