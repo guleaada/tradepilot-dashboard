@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TradePilot — share card</title>
+<style>
+  /* 1200x630 social card — same instrument-panel theme as index.html, but a
+     single fixed-size frame meant to be screenshot by CI, never scrolled. */
+  :root{
+    --bg:#0b0f14; --panel:#111820; --line:#1e2a35;
+    --ink:#e8eef2; --ink-dim:#8b9aa7; --ink-faint:#54636f;
+    --spot:#37e6c4; --spot-dim:#1c6b5e;
+    --fut:#ffb547; --fut-dim:#8a5f1f;
+    --grid:#16202a;
+    --mono:ui-monospace,"SF Mono",Menlo,monospace;
+    --sans:Inter,system-ui,-apple-system,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{width:1200px;height:630px;overflow:hidden}
+  body{
+    background:var(--bg);color:var(--ink);font-family:var(--sans);
+    padding:48px 56px 40px;display:flex;flex-direction:column;
+    background-image:
+      radial-gradient(700px 400px at 85% -10%,rgba(255,181,71,.08),transparent 60%),
+      radial-gradient(700px 400px at 5% 110%,rgba(55,230,196,.08),transparent 60%);
+  }
+  header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:26px}
+  .brand{display:flex;align-items:baseline;gap:14px}
+  .brand h1{font-size:34px;font-weight:700;letter-spacing:-.02em}
+  .brand .tick{font-family:var(--mono);font-size:14px;color:var(--fut);
+    border:1px solid var(--fut-dim);border-radius:100px;padding:4px 12px;letter-spacing:.04em}
+  .day{font-family:var(--mono);font-size:16px;color:var(--ink-dim)}
+  .day b{color:var(--ink)}
+  .head{font-size:52px;font-weight:700;letter-spacing:-.02em;line-height:1.1;margin-bottom:8px;color:var(--ink-dim)}
+  .head.spot{color:var(--spot)} .head.fut{color:var(--fut)}
+  .sub{font-family:var(--mono);font-size:17px;color:var(--ink-dim);margin-bottom:26px}
+  .chartbox{flex:1;background:linear-gradient(180deg,var(--panel),transparent);
+    border:1px solid var(--line);border-radius:16px;padding:16px 18px 8px}
+  svg{width:100%;height:100%;display:block}
+  svg text{font-family:var(--mono)}
+  footer{display:flex;justify-content:space-between;font-family:var(--mono);
+    font-size:14px;color:var(--ink-faint);margin-top:22px}
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand"><h1>TradePilot</h1><span class="tick">MISSION CONTROL</span></div>
+    <div class="day">day <b id="dayNum">—</b> of 30</div>
+  </header>
+  <div class="head" id="verdictHead">⚡ —</div>
+  <div class="sub" id="verdictSub"></div>
+  <div class="chartbox">
+    <svg id="mini" viewBox="0 0 1080 240" preserveAspectRatio="none" role="img" aria-label="Equity race"></svg>
+  </div>
+  <footer>
+    <span>spot long-only vs futures long+short 3× · paper · testnet · no real funds</span>
+    <span>guleaada.github.io/tradepilot-dashboard</span>
+  </footer>
+
+<script>
+"use strict";
+const SAMPLE={
+  meta:{day:4},
+  curves:{
+    spot:[0,0,0,0,0,0,0,0,0,0,0.05,0.12,0.09,0.18,0.20,0.16,0.24,0.22,0.31,0.28],
+    fut :[0,0,0.14,0.09,0.22,0.35,0.28,0.19,0.41,0.52,0.44,0.61,0.55,0.48,0.70,0.83,0.77,0.91,0.86,1.02]
+  },
+  spot:{retPct:0.28}, futures:{retPct:1.02},
+  verdict:{leader:"futures",gapPct:0.74,text:"Futures leading spot by +0.74%",day:4,spotRetPct:0.28,futRetPct:1.02}
+};
+const fmtPct=v=>v==null?"—":(v>=0?"+":"")+v.toFixed(2)+"%";
+
+function deriveVerdict(d){
+  const s=d.spot.retPct??0,f=d.futures.retPct??0,gap=Math.abs(f-s);
+  const leader=gap<0.05?'tie':f>s?'futures':'spot';
+  const text=leader==='tie'?'Dead heat'
+    :leader==='futures'?`Futures leading spot by +${gap.toFixed(2)}%`
+    :`Spot leading futures by +${gap.toFixed(2)}%`;
+  return {leader,gapPct:+gap.toFixed(2),text,day:d.meta.day,spotRetPct:s,futRetPct:f};
+}
+
+// simplified version of the dashboard's race chart
+function drawMini(curves){
+  const W=1080,H=240,padL=58,padR=110,padT=14,padB=20;
+  const all=[...curves.spot,...curves.fut].filter(n=>n!=null);
+  const min=Math.min(0,...all),max=Math.max(...all,0.01);
+  const n=Math.max(curves.spot.length,curves.fut.length);
+  const x=i=>padL+(i/(n-1||1))*(W-padL-padR);
+  const y=v=>padT+(1-(v-min)/(max-min))*(H-padT-padB);
+  let g="";
+  for(let t=0;t<=3;t++){
+    const val=min+(t/3)*(max-min),yy=y(val);
+    g+=`<line x1="${padL}" y1="${yy}" x2="${W-padR}" y2="${yy}" stroke="#16202a" stroke-width="1"/>`+
+       `<text x="${padL-8}" y="${yy+4}" text-anchor="end" font-size="13" fill="#54636f">${val>=0?'+':''}${val.toFixed(1)}%</text>`;
+  }
+  const line=(s,c)=>`<polyline points="${s.map((v,i)=>v==null?null:`${x(i)},${y(v)}`).filter(Boolean).join(' ')}" fill="none" stroke="${c}" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+  g+=line(curves.spot,'#37e6c4')+line(curves.fut,'#ffb547');
+  const dot=(s,c,lbl)=>{
+    let i=s.length-1;while(i>0&&s[i]==null)i--;
+    if(s[i]==null)return"";
+    return `<circle cx="${x(i)}" cy="${y(s[i])}" r="5" fill="${c}"/>`+
+      `<text x="${x(i)+12}" y="${y(s[i])+5}" font-size="15" font-weight="600" fill="${c}">${lbl} ${fmtPct(s[i])}</text>`;
+  };
+  g+=dot(curves.spot,'#37e6c4','SPOT')+dot(curves.fut,'#ffb547','FUT');
+  document.getElementById('mini').innerHTML=g;
+}
+
+function render(d){
+  const v=d.verdict??deriveVerdict(d);
+  document.getElementById('dayNum').textContent=v.day??d.meta.day;
+  const head=document.getElementById('verdictHead');
+  head.className='head '+(v.leader==='futures'?'fut':v.leader==='spot'?'spot':'');
+  head.textContent=`⚡ ${v.text}`;
+  document.getElementById('verdictSub').textContent=
+    `spot ${fmtPct(v.spotRetPct)} vs futures ${fmtPct(v.futRetPct)} · cumulative % return, day ${v.day??d.meta.day} of 30`;
+  drawMini(d.curves);
+  document.body.dataset.ready="1"; // Playwright waits for this before the screenshot
+}
+
+fetch('./data.json',{cache:'no-store'})
+  .then(r=>{if(!r.ok)throw 0;return r.json();})
+  .then(render)
+  .catch(()=>render(SAMPLE));
+</script>
+</body>
+</html>

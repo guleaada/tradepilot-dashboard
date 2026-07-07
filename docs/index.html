@@ -4,6 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TradePilot — Mission Control</title>
+<!-- social unfurl: card-latest.png is re-rendered by CI with the current standings -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="TradePilot Mission Control — spot vs futures, 30-day paper race">
+<meta property="og:description" content="Dual-agent A/B on testnet: long-only spot vs long+short 3× futures. Live standings, no real funds.">
+<meta property="og:url" content="https://guleaada.github.io/tradepilot-dashboard/">
+<meta property="og:image" content="https://guleaada.github.io/tradepilot-dashboard/card-latest.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="TradePilot Mission Control — spot vs futures">
+<meta name="twitter:image" content="https://guleaada.github.io/tradepilot-dashboard/card-latest.png">
 <style>
   /* ---- design tokens ---------------------------------------------------
      Subject: a dual-agent trading experiment, spot vs futures, racing.
@@ -61,6 +72,15 @@
   .live .dot{width:7px;height:7px;border-radius:50%;background:var(--up);
     box-shadow:0 0 0 0 rgba(61,220,132,.6);animation:pulse 2s infinite}
   @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(61,220,132,.55)}70%{box-shadow:0 0 0 7px rgba(61,220,132,0)}100%{box-shadow:0 0 0 0 rgba(61,220,132,0)}}
+
+  /* ---- verdict headline ---- */
+  .verdict{border:1px solid var(--line);border-radius:16px;padding:18px 22px;margin-bottom:20px}
+  .verdict .head{font-size:clamp(22px,4vw,34px);font-weight:700;letter-spacing:-.02em;line-height:1.15;color:var(--ink-dim)}
+  .verdict .sub2{font-family:var(--mono);font-size:12px;color:var(--ink-dim);margin-top:6px}
+  .verdict.spot{border-color:var(--spot-dim);background:linear-gradient(135deg,rgba(55,230,196,.12),transparent 55%)}
+  .verdict.spot .head{color:var(--spot)}
+  .verdict.fut{border-color:var(--fut-dim);background:linear-gradient(135deg,rgba(255,181,71,.12),transparent 55%)}
+  .verdict.fut .head{color:var(--fut)}
 
   /* ---- legend ---- */
   .legend{display:flex;gap:20px;margin-bottom:18px;font-family:var(--mono);font-size:12px;flex-wrap:wrap}
@@ -155,6 +175,12 @@
       <div>day <b id="dayNum">—</b> of 30 · updated <b id="updated">—</b></div>
     </div>
   </header>
+
+  <!-- VERDICT HEADLINE -->
+  <section class="verdict" id="verdict" aria-live="polite">
+    <div class="head" id="verdictHead">⚡ —</div>
+    <div class="sub2" id="verdictSub"></div>
+  </section>
 
   <div class="banner" id="banner">Paper trading on testnet — no real funds. Compare bots on % metrics: both risk 1% equity/trade.</div>
 
@@ -306,6 +332,25 @@ function renderCurves(curves){
   svg.innerHTML=g;
 }
 
+/* verdict headline: prefer the exporter's verdict block; derive it from the
+   two retPcts when absent (sample data / older data.json). */
+function deriveVerdict(d){
+  const s=d.spot.retPct??0, f=d.futures.retPct??0, gap=Math.abs(f-s);
+  const leader=gap<0.05?'tie':f>s?'futures':'spot';
+  const text=leader==='tie'?'Dead heat'
+    :leader==='futures'?`Futures leading spot by +${gap.toFixed(2)}%`
+    :`Spot leading futures by +${gap.toFixed(2)}%`;
+  return {leader, gapPct:+gap.toFixed(2), text, day:d.meta.day, spotRetPct:s, futRetPct:f};
+}
+
+function renderVerdict(v){
+  const el=document.getElementById('verdict');
+  el.className='verdict '+(v.leader==='futures'?'fut':v.leader==='spot'?'spot':'');
+  document.getElementById('verdictHead').textContent=`⚡ ${v.text} · day ${v.day} of 30`;
+  document.getElementById('verdictSub').textContent=
+    `spot ${fmtPct(v.spotRetPct)} vs futures ${fmtPct(v.futRetPct)} · gap ${v.gapPct.toFixed(2)}% · paper/testnet`;
+}
+
 function metricRow(k,v){return `<div class="metric"><span class="k">${k}</span><span class="v">${v}</span></div>`;}
 
 function renderCard(prefix,d,base){
@@ -366,6 +411,7 @@ function renderFeed(list){
 }
 
 function render(d){
+  renderVerdict(d.verdict??deriveVerdict(d));
   document.getElementById('dayNum').textContent=d.meta.day;
   document.getElementById('updated').textContent=d.meta.updated;
   document.getElementById('raceCaption').textContent=

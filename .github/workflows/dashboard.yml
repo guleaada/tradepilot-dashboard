@@ -8,7 +8,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: read
+  contents: write # the build job commits the rendered share card back to the repo
   pages: write
   id-token: write
 
@@ -54,6 +54,53 @@ jobs:
             --start-date 2026-07-04 \
             --out docs/data.json
           cat docs/data.json | head -5
+
+      # Daily share card: render card.html (verdict + mini race) to a PNG so
+      # the live URL unfurls with current standings when shared.
+      - name: Render share card
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+          DAY=$(python -c "import json; print(json.load(open('docs/data.json'))['verdict']['day'])")
+          echo "CARD_DAY=${DAY}" >> "$GITHUB_ENV"
+          mkdir -p docs/cards
+          python scripts/render_card.py docs/card-latest.png
+          cp docs/card-latest.png "docs/cards/day-${DAY}.png"
+
+      # Commit the card back (same resilient pattern as the agent bots): this
+      # is bookkeeping and must NEVER fail the job — a benign push race just
+      # means the next run re-commits it.
+      - name: Commit share card
+        run: |
+          set +e
+          git config user.name "tradepilot-dashboard-bot"
+          git config user.email "tradepilot-dashboard-bot@users.noreply.github.com"
+          BRANCH="${GITHUB_REF_NAME:-main}"
+          git checkout -B "$BRANCH"
+          git add docs/cards docs/card-latest.png
+          if git diff --cached --quiet; then
+            echo "no card changes to commit"
+            exit 0
+          fi
+          git commit -m "card: day ${CARD_DAY}"
+          pushed=0
+          for attempt in 1 2 3; do
+            git fetch origin "$BRANCH" || true
+            if git rebase -X theirs "origin/$BRANCH"; then
+              if git push origin "HEAD:$BRANCH"; then
+                pushed=1
+                break
+              fi
+            else
+              git rebase --abort 2>/dev/null || true
+            fi
+            echo "card push attempt $attempt did not land; backing off"
+            sleep $((attempt * 5))
+          done
+          if [ "$pushed" != 1 ]; then
+            echo "::warning::card push failed after retries; next run will retry"
+          fi
+          exit 0
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

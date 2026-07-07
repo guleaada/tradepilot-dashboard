@@ -32,9 +32,17 @@ def has_col(db, table, col):
     except sqlite3.Error:
         return False
 
-def curve(db, base):
-    """Equity snapshots -> cumulative % return series."""
-    rows = q(db, "SELECT equity FROM equity_snapshots ORDER BY id")
+def curve(db, base, since=None):
+    """Equity snapshots -> cumulative % return series.
+
+    `since` (YYYY-MM-DD) trims to the experiment window so both agents' series
+    share a comparable index: the spot bot has pre-experiment history that
+    would otherwise squash the futures line to the left of the shared axis.
+    """
+    if since:
+        rows = q(db, "SELECT equity FROM equity_snapshots WHERE ts >= ? ORDER BY id", (f"{since}T00:00:00",))
+    else:
+        rows = q(db, "SELECT equity FROM equity_snapshots ORDER BY id")
     if not rows:
         return [0.0]
     return [round((r[0] / base - 1) * 100, 4) for r in rows]
@@ -134,6 +142,24 @@ def feed(spot, fut):
     if spot:  pull(spot, "spot", has_col(spot, "trades", "direction"))
     return items[:8]
 
+def verdict(spot_ret, fut_ret, day):
+    """The race headline: who leads, by how much (in % return points)."""
+    gap = abs(fut_ret - spot_ret)
+    if gap < 0.05:
+        leader, text = "tie", "Dead heat"
+    elif fut_ret > spot_ret:
+        leader, text = "futures", f"Futures leading spot by +{gap:.2f}%"
+    else:
+        leader, text = "spot", f"Spot leading futures by +{gap:.2f}%"
+    return {
+        "leader": leader,
+        "gapPct": round(gap, 2),
+        "text": text,
+        "day": day,
+        "spotRetPct": round(spot_ret, 3),
+        "futRetPct": round(fut_ret, 3),
+    }
+
 def connect(path):
     if path and os.path.exists(path):
         try:
@@ -170,8 +196,8 @@ def main():
             "futures": {"base": a.futures_base, "leverage": a.leverage},
         },
         "curves": {
-            "spot": curve(sdb, a.spot_base) if sdb else [0.0],
-            "fut": curve(fdb, a.futures_base) if fdb else [0.0],
+            "spot": curve(sdb, a.spot_base, a.start_date) if sdb else [0.0],
+            "fut": curve(fdb, a.futures_base, a.start_date) if fdb else [0.0],
         },
         "spot": trade_stats(sdb, a.spot_base) if sdb else {"equity": a.spot_base, "retPct": 0, "trades": 0, "winRate": None, "profitFactor": None, "maxDdPct": 0, "avgR": None, "openPositions": 0},
         "futures": trade_stats(fdb, a.futures_base, futures=True) if fdb else {"equity": a.futures_base, "retPct": 0, "trades": 0, "winRate": None, "profitFactor": None, "maxDdPct": 0, "avgR": None, "openPositions": 0},
@@ -179,6 +205,7 @@ def main():
         "trendR": trend_r(fdb) if fdb else [],
         "feed": feed(sdb, fdb),
     }
+    data["verdict"] = verdict(data["spot"]["retPct"], data["futures"]["retPct"], data["meta"]["day"])
 
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     with open(a.out, "w") as f:

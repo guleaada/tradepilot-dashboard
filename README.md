@@ -5,6 +5,7 @@ A live dashboard for the dual-agent A/B experiment: the **spot** bot (long-only,
 It reads the committed SQLite DBs from both agent repos, exports a single `data.json`, and renders a self-contained dashboard on GitHub Pages — auto-refreshing twice an hour.
 
 ## What it shows
+- **Verdict headline** — who's leading and by how many % points, coloured by leader
 - **The Race** — both equity curves overlaid as cumulative % return
 - **Side-by-side stats** — equity, % return, win rate, profit factor, max drawdown, avg R, and (futures) long vs short P&L split
 - **Entry blockers** — which filter is throttling the most trades in the last 24h
@@ -32,6 +33,20 @@ python export_dashboard.py \
   --out docs/data.json
 # then serve the folder:
 python -m http.server -d docs 8080   # open http://localhost:8080
+```
+
+## Share card & embed badge
+
+Every build renders a **1200×630 share card** (`docs/card-latest.png`, plus a
+daily `docs/cards/day-N.png` archive) and commits it back to the repo. The
+dashboard's Open Graph / Twitter tags point at `card-latest.png`, so sharing
+the live URL on X/LinkedIn/Slack unfurls with the current standings.
+
+To embed the live standings badge anywhere:
+
+```html
+<iframe src="https://guleaada.github.io/tradepilot-dashboard/badge.html"
+        width="360" height="120" style="border:0"></iframe>
 ```
 
 ## Notes
