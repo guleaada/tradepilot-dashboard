@@ -122,6 +122,63 @@ def trend_r(db):
             "avgR": round(r[3], 3) if r[3] is not None else None} for r in rows]
     return sorted(out, key=lambda x: order.get(x["cls"], 9))
 
+def latest_regimes(db):
+    """Newest regime opinion per pair: {pair: (regime, confidence)}."""
+    out = {}
+    for pair, regime, conf in q(db, """
+        SELECT pair, regime, confidence FROM regime_calls
+        WHERE id IN (SELECT MAX(id) FROM regime_calls GROUP BY pair)
+    """):
+        out[pair] = (regime, conf)
+    return out
+
+def pair_scores(spot, fut):
+    """Per-pair scorecard across both agents: the 'where is the edge' view.
+
+    For every pair either bot has traded or has a regime on, report each bot's
+    closed-trade count + realized P&L + whether it's open now, plus the latest
+    futures regime/confidence (futures covers the wider 15-pair universe).
+    Sorted by combined |P&L| desc, then by open positions, then pair name — so
+    the pairs actually moving the needle float to the top. Empty-but-valid
+    until trades close; regime column is populated from cycle one.
+    """
+    def agg(db):
+        if not db:
+            return {}, {}
+        closed = {}
+        for pair, n, pnl in q(db, """
+            SELECT pair, COUNT(*), COALESCE(SUM(pnl), 0)
+            FROM trades WHERE status='closed' AND pnl IS NOT NULL GROUP BY pair
+        """):
+            closed[pair] = {"trades": n, "pnl": round(pnl, 2)}
+        openp = {}
+        dircol = "direction" if has_col(db, "trades", "direction") else "'long'"
+        for pair, direction in q(db, f"SELECT pair, {dircol} FROM trades WHERE status='open'"):
+            openp[pair] = direction or "long"
+        return closed, openp
+
+    s_closed, s_open = agg(spot)
+    f_closed, f_open = agg(fut)
+    regimes = latest_regimes(fut) or latest_regimes(spot)
+
+    pairs = set(s_closed) | set(s_open) | set(f_closed) | set(f_open) | set(regimes)
+    rows = []
+    for p in pairs:
+        s = s_closed.get(p, {"trades": 0, "pnl": 0.0})
+        f = f_closed.get(p, {"trades": 0, "pnl": 0.0})
+        reg, conf = regimes.get(p, (None, None))
+        rows.append({
+            "pair": p,
+            "regime": reg, "confidence": conf,
+            "spotTrades": s["trades"], "spotPnl": s["pnl"], "spotOpen": p in s_open,
+            "futTrades": f["trades"], "futPnl": f["pnl"],
+            "futOpen": f_open.get(p),  # direction string or None
+            "totalPnl": round(s["pnl"] + f["pnl"], 2),
+            "open": p in s_open or p in f_open,
+        })
+    rows.sort(key=lambda r: (-abs(r["totalPnl"]), not r["open"], r["pair"]))
+    return rows[:15]
+
 def feed(spot, fut):
     items = []
     def pull(db, bot, has_dir):
@@ -203,6 +260,7 @@ def main():
         "futures": trade_stats(fdb, a.futures_base, futures=True) if fdb else {"equity": a.futures_base, "retPct": 0, "trades": 0, "winRate": None, "profitFactor": None, "maxDdPct": 0, "avgR": None, "openPositions": 0},
         "blockers": blockers(fdb) if fdb else [],
         "trendR": trend_r(fdb) if fdb else [],
+        "pairScores": pair_scores(sdb, fdb),
         "feed": feed(sdb, fdb),
     }
     data["verdict"] = verdict(data["spot"]["retPct"], data["futures"]["retPct"], data["meta"]["day"])

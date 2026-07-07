@@ -8,6 +8,7 @@ It reads the committed SQLite DBs from both agent repos, exports a single `data.
 - **Verdict headline** — who's leading and by how many % points, coloured by leader
 - **The Race** — both equity curves overlaid as cumulative % return
 - **Side-by-side stats** — equity, % return, win rate, profit factor, max drawdown, avg R, and (futures) long vs short P&L split
+- **Per-pair scorecard** — realized P&L per symbol for each agent, its live AI regime, and who holds it open; sorted by impact ("where's the edge?")
 - **Entry blockers** — which filter is throttling the most trades in the last 24h
 - **Realized R by trend class** — the verdict on dynamic take-profit: do strong-trend entries actually run further?
 - **Trade feed** — recent trades from both agents, colour-coded long/short

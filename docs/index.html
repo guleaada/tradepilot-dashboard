@@ -138,6 +138,10 @@
   .chip.strong{color:var(--up);background:rgba(61,220,132,.12)}
   .chip.normal{color:var(--fut);background:rgba(255,181,71,.12)}
   .chip.weak{color:var(--ink-dim);background:rgba(139,154,167,.1)}
+  .chip.bullish{color:var(--up);background:rgba(61,220,132,.12)}
+  .chip.bearish{color:var(--down);background:rgba(255,93,108,.12)}
+  .chip.chop{color:var(--ink-dim);background:rgba(139,154,167,.1)}
+  .chip.open{color:var(--fut);background:rgba(255,181,71,.12);font-size:9.5px}
   .rpos{color:var(--up)}.rneg{color:var(--down)}
 
   /* trade feed */
@@ -231,6 +235,18 @@
     </div>
   </div>
 
+  <!-- PER-PAIR SCORECARD -->
+  <div class="panel" style="margin-bottom:20px">
+    <h3>Per-pair scorecard — where's the edge?</h3>
+    <table>
+      <thead><tr><th>Pair</th><th>Regime</th><th>Spot P&L</th><th>Futures P&L</th><th>Total</th><th>Status</th></tr></thead>
+      <tbody id="scoreTable"></tbody>
+    </table>
+    <div style="font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);margin-top:10px;line-height:1.5">
+      realized P&L per symbol for each agent, its live AI regime, and who holds it open. sorted by impact.
+    </div>
+  </div>
+
   <!-- TRADE FEED -->
   <div class="panel" style="margin-bottom:20px">
     <h3>Recent trades — both agents</h3>
@@ -277,6 +293,12 @@ const SAMPLE = {
     {cls:"strong", n:1, win:1.0, avgR:2.9},
     {cls:"normal", n:2, win:0.5, avgR:0.8},
     {cls:"weak",   n:0, win:null, avgR:null}
+  ],
+  pairScores:[
+    {pair:"SOLUSDT", regime:"bullish", confidence:72, spotPnl:6.79, spotOpen:true, futPnl:12.10, futOpen:"long", totalPnl:18.89, open:true},
+    {pair:"ETHUSDT", regime:"bearish", confidence:68, spotPnl:0, spotOpen:false, futPnl:6.79, futOpen:null, totalPnl:6.79, open:false},
+    {pair:"BTCUSDT", regime:"chop", confidence:52, spotPnl:0, spotOpen:false, futPnl:0, futOpen:"long", totalPnl:0, open:true},
+    {pair:"AVAXUSDT",regime:"bullish", confidence:60, spotPnl:0, spotOpen:false, futPnl:0, futOpen:null, totalPnl:0, open:false}
   ],
   feed:[
     {bot:"fut", dir:"long",  pair:"SOLUSDT", entry:77.34, exit:83.14, pnl:12.10, note:"strong · tp 4.5R", closed:true},
@@ -394,6 +416,26 @@ function renderTrend(rows){
     </tr>`).join('');
 }
 
+function renderScores(rows){
+  const el=document.getElementById('scoreTable');
+  if(!rows||!rows.length){el.innerHTML='<tr><td colspan="6" style="color:var(--ink-faint)">no pair activity yet — regimes populate from cycle one, P&L as trades close</td></tr>';return;}
+  const pnlCell=v=>v==0?'<span style="color:var(--ink-faint)">—</span>':`<span class="${v>=0?'rpos':'rneg'}">${v>=0?'+':''}${fmtUsd(v)}</span>`;
+  el.innerHTML=rows.map(r=>{
+    const reg=r.regime?`<span class="chip ${r.regime}">${r.regime} ${r.confidence??''}</span>`:'<span style="color:var(--ink-faint)">—</span>';
+    const status=[];
+    if(r.spotOpen)status.push('<span class="chip open">SPOT</span>');
+    if(r.futOpen)status.push(`<span class="chip open">FUT ${r.futOpen.toUpperCase()}</span>`);
+    return `<tr>
+      <td><b>${r.pair}</b></td>
+      <td>${reg}</td>
+      <td>${pnlCell(r.spotPnl)}</td>
+      <td>${pnlCell(r.futPnl)}</td>
+      <td class="${r.totalPnl>=0?'rpos':'rneg'}">${r.totalPnl==0?'—':(r.totalPnl>=0?'+':'')+fmtUsd(r.totalPnl)}</td>
+      <td>${status.join(' ')||'<span style="color:var(--ink-faint)">—</span>'}</td>
+    </tr>`;
+  }).join('');
+}
+
 function renderFeed(list){
   document.getElementById('feed').innerHTML=list.map(t=>{
     const botTag=t.bot==='fut'
@@ -421,6 +463,7 @@ function render(d){
   renderCard('fut',d.futures,d.meta.futures.base);
   renderBlockers(d.blockers);
   renderTrend(d.trendR);
+  renderScores(d.pairScores);
   renderFeed(d.feed);
 }
 
