@@ -56,11 +56,17 @@ jobs:
           cat docs/data.json | head -5
 
       # Daily share card: render card.html (verdict + mini race) to a PNG so
-      # the live URL unfurls with current standings when shared.
+      # the live URL unfurls with current standings when shared. Best-effort:
+      # a flaky runner mirror (seen live: apt NOSPLIT errors from
+      # packages.microsoft.com during --with-deps) must never block the data
+      # deploy — the previously committed card stays valid.
       - name: Render share card
+        continue-on-error: true
         run: |
           pip install playwright
-          playwright install --with-deps chromium
+          # ubuntu-latest already ships Chromium's system libs; fall back to a
+          # dep-less install when apt mirrors are having a bad day.
+          playwright install --with-deps chromium || playwright install chromium
           DAY=$(python -c "import json; print(json.load(open('docs/data.json'))['verdict']['day'])")
           echo "CARD_DAY=${DAY}" >> "$GITHUB_ENV"
           mkdir -p docs/cards
