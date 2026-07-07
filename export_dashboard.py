@@ -32,22 +32,39 @@ def has_col(db, table, col):
     except sqlite3.Error:
         return False
 
+def window_snaps(db, since=None):
+    """Equity snapshots inside the experiment window (all history if no since)."""
+    if since:
+        return q(db, "SELECT equity FROM equity_snapshots WHERE ts >= ? ORDER BY id", (f"{since}T00:00:00",))
+    return q(db, "SELECT equity FROM equity_snapshots ORDER BY id")
+
+
+def window_base(db, base, since=None):
+    """The equity each agent BROUGHT INTO the experiment window.
+
+    Returns are measured against this, not the nominal account base: the spot
+    bot entered the window already +1.4% from its June inception, and
+    normalizing to the account base credited those pre-race gains to the race
+    verdict. Both curves must start at ~0% on day 1.
+    """
+    rows = window_snaps(db, since)
+    return rows[0][0] if rows and rows[0][0] else base
+
+
 def curve(db, base, since=None):
-    """Equity snapshots -> cumulative % return series.
+    """Equity snapshots -> cumulative % return series since the window start.
 
     `since` (YYYY-MM-DD) trims to the experiment window so both agents' series
     share a comparable index: the spot bot has pre-experiment history that
     would otherwise squash the futures line to the left of the shared axis.
     """
-    if since:
-        rows = q(db, "SELECT equity FROM equity_snapshots WHERE ts >= ? ORDER BY id", (f"{since}T00:00:00",))
-    else:
-        rows = q(db, "SELECT equity FROM equity_snapshots ORDER BY id")
+    rows = window_snaps(db, since)
     if not rows:
         return [0.0]
-    return [round((r[0] / base - 1) * 100, 4) for r in rows]
+    wbase = window_base(db, base, since)
+    return [round((r[0] / wbase - 1) * 100, 4) for r in rows]
 
-def trade_stats(db, base, futures=False):
+def trade_stats(db, base, futures=False, since=None):
     closed = q(db, "SELECT pnl, initial_risk, qty, entry_price FROM trades WHERE status='closed' AND pnl IS NOT NULL")
     equity = one(db, "SELECT equity FROM equity_snapshots ORDER BY id DESC LIMIT 1", default=base)
     open_n = one(db, "SELECT COUNT(*) FROM trades WHERE status='open'", default=0)
@@ -63,8 +80,10 @@ def trade_stats(db, base, futures=False):
         risk = (ir or 0) * (qty or 0)
         if risk > 0:
             rs.append(pnl / risk)
-    # drawdown from snapshots
-    snaps = [r[0] for r in q(db, "SELECT equity FROM equity_snapshots ORDER BY id")]
+    # % return and drawdown measured INSIDE the experiment window, against the
+    # equity the agent brought into it (see window_base)
+    wbase = window_base(db, base, since)
+    snaps = [r[0] for r in window_snaps(db, since)]
     peak, max_dd = -1e18, 0.0
     for e in snaps:
         peak = max(peak, e)
@@ -72,7 +91,7 @@ def trade_stats(db, base, futures=False):
             max_dd = max(max_dd, (peak - e) / peak)
     out = {
         "equity": round(equity, 2),
-        "retPct": round((equity / base - 1) * 100, 3),
+        "retPct": round((equity / wbase - 1) * 100, 3),
         "trades": n,
         "winRate": (len(wins) / n) if n else None,
         "profitFactor": (gross_win / gross_loss) if gross_loss > 0 else None,
@@ -256,8 +275,8 @@ def main():
             "spot": curve(sdb, a.spot_base, a.start_date) if sdb else [0.0],
             "fut": curve(fdb, a.futures_base, a.start_date) if fdb else [0.0],
         },
-        "spot": trade_stats(sdb, a.spot_base) if sdb else {"equity": a.spot_base, "retPct": 0, "trades": 0, "winRate": None, "profitFactor": None, "maxDdPct": 0, "avgR": None, "openPositions": 0},
-        "futures": trade_stats(fdb, a.futures_base, futures=True) if fdb else {"equity": a.futures_base, "retPct": 0, "trades": 0, "winRate": None, "profitFactor": None, "maxDdPct": 0, "avgR": None, "openPositions": 0},
+        "spot": trade_stats(sdb, a.spot_base, since=a.start_date) if sdb else {"equity": a.spot_base, "retPct": 0, "trades": 0, "winRate": None, "profitFactor": None, "maxDdPct": 0, "avgR": None, "openPositions": 0},
+        "futures": trade_stats(fdb, a.futures_base, futures=True, since=a.start_date) if fdb else {"equity": a.futures_base, "retPct": 0, "trades": 0, "winRate": None, "profitFactor": None, "maxDdPct": 0, "avgR": None, "openPositions": 0},
         "blockers": blockers(fdb) if fdb else [],
         "trendR": trend_r(fdb) if fdb else [],
         "pairScores": pair_scores(sdb, fdb),

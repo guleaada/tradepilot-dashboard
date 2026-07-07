@@ -380,7 +380,7 @@ function renderCard(prefix,d,base){
   document.getElementById(prefix+'Eq').textContent=fmtUsd(d.equity);
   const retEl=document.getElementById(prefix+'Ret');
   retEl.className='ret '+retClass;
-  retEl.textContent=`${fmtPct(d.retPct)} · ${fmtUsd(d.equity-base)} from ${fmtUsd(base)} base`;
+  retEl.textContent=`${fmtPct(d.retPct)} since day 1 · ${fmtUsd(d.equity-base)} lifetime from ${fmtUsd(base)} base`;
   const m=document.getElementById(prefix+'Metrics');
   const rows=[
     ['Trades', d.trades],
@@ -407,6 +407,11 @@ function renderBlockers(list){
 }
 
 function renderTrend(rows){
+  if(!rows.length){
+    document.getElementById('trendTable').innerHTML=
+      `<tr><td colspan="4" style="color:var(--ink-faint);font-style:italic">no closed futures trades yet — populates after the first exit</td></tr>`;
+    return;
+  }
   document.getElementById('trendTable').innerHTML=rows.map(r=>`
     <tr>
       <td><span class="chip ${r.cls}">${r.cls}</span></td>
@@ -457,7 +462,7 @@ function render(d){
   document.getElementById('dayNum').textContent=d.meta.day;
   document.getElementById('updated').textContent=d.meta.updated;
   document.getElementById('raceCaption').textContent=
-    `spot base ${fmtUsd(d.meta.spot.base)} · futures base ${fmtUsd(d.meta.futures.base)} @ ${d.meta.futures.leverage}× · both normalized to % return`;
+    `spot base ${fmtUsd(d.meta.spot.base)} · futures base ${fmtUsd(d.meta.futures.base)} @ ${d.meta.futures.leverage}× · % return since day 1 of the experiment (both start at 0%)`;
   renderCurves(d.curves);
   renderCard('spot',d.spot,d.meta.spot.base);
   renderCard('fut',d.futures,d.meta.futures.base);
